@@ -5,7 +5,7 @@
 👉 **[Continue development on Gitea](https://git.furylogic.com/Mr-DS-ML-85/pmos-holly-u19)**
 
 # Disclaimer :
-## Due to heavy bot scraping the Gitea of FuryLogic, the instance is now restricted for an interim period
+## Due to heavy bot scraping the Gitea of FuryLogic Labs, the instance is now restricted for an interim period
 
 Mainline Linux kernel port for the Huawei Honor Holly (Hol-U19) / Honor 3C Lite,
 a MediaTek MT6582 quad-core Cortex-A7 smartphone.
