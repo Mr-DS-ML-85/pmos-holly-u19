@@ -28,7 +28,7 @@ a MediaTek MT6582 quad-core Cortex-A7 smartphone.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Boot | ✅ Works | MTK boot image format, WDT disabled |
+| Boot | ✅ Works | MTK boot image format; `reboot` restarts (WDT AUTO_RESTART fix), `sudo reboot-bootloader` → fastboot |
 | pmOS rootfs | ✅ Boots | patched rootfs (sshd + fixed `/boot` fstab) physically on `mmcblk0p5` |
 | SSH | ✅ Works | OpenSSH on `172.16.42.1:22`, login `user`/`12345678` |
 | Serial console | ✅ Works | UART0 @ 921600 baud + **USB serial gadget** (CDC ACM, `/dev/ttyACM0`) |
@@ -37,16 +37,87 @@ a MediaTek MT6582 quad-core Cortex-A7 smartphone.
 | USB MUSB gadget | ✅ Works | IRQ `GIC_SPI 32` + VBUS comparator; phone enumerates & console reachable over USB |
 | **BusyBox shell** | ✅ Works | Static ARM BusyBox 1.37.0, `holly#` prompt, **concurrent** USB serial + phone LCD consoles |
 | eMMC | ✅ Works | `mmcblk0` enumerated (p1-p7 + boot0/boot1); `/init` probes each partition for a bootable root |
-| Plasma desktop | ✅ Boots | full Plasma session (slow first paint — 4× A7) |
-| GPU (lima) | ⚠️ Probes, unstable | Mali-400 MP2 initializes; job-timeout + IRQ-disabled on first real load |
+| UI | ✅ Phosh | greetd + phrog login, Phosh shell (replaced Plasma Mobile); apps: Console, Text Editor, Calculator, Clocks, Weather, Loupe, Evince, Web |
+| Display | ✅ Works | simplefb/simpledrm on LK's pipeline; leftover LK OVL layer disabled at boot (blank-screen fix) |
+| GPU (lima) | ✅ Works | Mali-400 MP2 renders Phosh; Mali IRQs fixed to SPI 170–175 (were off by 4) |
+| Buttons | ✅ Works | Vol up/down (SoC keypad), Power (MT6323, polled), nav Back/Home/Menu (touch keys) |
+| Battery / charging | ❌ No | battery dead + no charger driver (needs PMIC IRQ) — runs on external clip power, see **Power & battery** |
 | USB networking + internet | ✅ Works | gadget 172.16.42.1, **persistent host-side NAT** (udev rule) |
-| Clock | ✅ NTP (no HW RTC) | date correct once online; `rtc-mt6397` blocked on PMIC IRQ |
-| Remote control | ✅ Works | KRDP RDP server (port 3390) as touchscreen bypass — needs an H.264-capable client |
+| Clock | ⚠️ NTP only | no HW RTC: boots at 1970 until NTP syncs; `rtc-mt6397` blocked on PMIC IRQ |
+| Remote control | ⚠️ Removed | KRDP went with Plasma; no longer needed now that touch works |
 | WiFi/BT | ❌ Not started | MT6627N/MT6628 WMT driver needed |
-| Touchscreen | ❌ **HW dead** | GT9xx IC register file/CPU dead (bus-echo signature); driver complete & waiting for healthy panel |
+| Touchscreen | ✅ Works | GT9157 via goodix (polling mode); fixes: MT6582 I2C no-WRRD/FIFO, GPIO5 bias-disable, shipped config — engineering.md §40 |
+| HW video decode/encode | ❌ Not possible yet | vendor codec stack is Android-only (`RE/system_hals/vcodec/`) — engineering.md §41.7 |
 | Cellular | ❌ Not started | CCCI + ModemManager |
 | Audio | ❌ Not started | ALSA + modem speech |
 | Camera | ❌ Not started | OV5648 + ISP pipeline |
+
+## Power & battery (read this before you plug anything in)
+
+This unit's **battery is dead and the phone does not charge**:
+
+- **No charging under pmOS.** Charging, battery monitoring and the hardware RTC all need the
+  MT6323 PMIC interrupt, which is still **not wired** in the device tree (an earlier attempt
+  caused an eMMC panic — see `chipfix.md` golden rules). Linux therefore never starts the
+  charger. Only stock Android/LK's charging screen can charge, and this battery may be beyond it.
+- **External power via clips.** The phone runs from a bench supply clipped to the battery
+  terminals. Use **3.8–4.0 V, never above 4.2 V**, current-limited to ~1.5–2 A, and double-check
+  polarity — reversed or shorted clips can kill the board. Don't power a swollen battery.
+- **It boots by itself when power appears.** The PMIC powers on as soon as voltage shows up
+  (clips or USB), and LK samples Volume-Down for fastboot only in a short window right after
+  that — hold Volume-Down *before* connecting power if you want the button route. The phone
+  can also be powered from USB alone, so a single clip still boots it.
+- **Brown-outs under load.** Heavy CPU/eMMC work (e.g. `apk` installs) draws more current; if
+  the supply sags the USB link can drop. Prefer a stiff supply; don't reboot during installs.
+
+### Restarting and fastboot (no buttons needed)
+
+| Want | Command | Notes |
+|---|---|---|
+| Restart | `sudo reboot` | used to **power the phone off**: mainline `mtk_wdt` didn't set the vendor `AUTO_RESTART` ("bypass power key") bit, so after the reset the boot ROM waited for a power-key press. Fixed in `mtk_wdt.c` (`mt6582_data`). |
+| Fastboot | `sudo reboot-bootloader` | BusyBox `reboot bootloader` **drops the argument**; this helper (`tools/device/reboot-bootloader`) calls `reboot(2)` with `"bootloader"`, the mt6323 reboot-mode driver sets the RTC fastboot flag and LK enters fastboot. Leave with `fastboot reboot`. |
+| Flash boot without fastboot | `dd` from pmOS | see **Flashing from a running pmOS** below |
+
+The RTC fastboot flag lives in the PMIC; cutting the clip power wipes it, so keep power steady
+across `reboot-bootloader`.
+
+### Power button and screen
+
+- The power key is the MT6323 PWRKEY. With no PMIC interrupt, `mtk-pmic-keys` now **polls** it
+  every 50 ms (kernel fallback when `pmic->irq == 0`).
+- Phosh blanks the screen on the power key but **never unblanks** on this simpledrm display.
+  `power-wake` (`tools/device/power-wake` + OpenRC `power-wake.initd`, enabled at boot) watches
+  the key and wakes the screen over `org.gnome.Mutter.DisplayConfig PowerSaveMode = 0` when it
+  is pressed while the screen is off.
+- Screen idle blanking and auto-lock are disabled (`tools/device/phosh-holly-settings.sh`).
+- **Lock screen says the PIN is wrong:** with no RTC the clock starts at 1970, so the
+  password's "last changed" date looks like the future and `unix_chkpwd` refuses it. Fixed
+  once with `chage -d -1 user`; NTP corrects the clock when the phone is online.
+- Avoid long-pressing power: the PMIC's long-press reset is still armed.
+
+### Buttons
+
+| Button | Hardware | Key | In Phosh |
+|---|---|---|---|
+| Volume up | SoC keypad row 0 / col 0 | `KEY_VOLUMEUP` | volume (no audio driver yet) |
+| Volume down | SoC keypad **col 1** (vendor table says col 2 — wrong for Holly); worn switch → press firmly, 64 ms debounce | `KEY_VOLUMEDOWN` | volume |
+| Power | MT6323 PWRKEY (polled) | `KEY_POWER` | screen off / on (`power-wake`) |
+| Nav left | GT9157 touch-key bit 2 | `KEY_BACK` | back in GTK/libadwaita apps |
+| Nav middle | GT9157 touch-key bit 1 | `KEY_LEFTMETA` (Super) | Phosh overview |
+| Nav right | GT9157 touch-key bit 0 | `KEY_MENU` | Phosh app grid (`toggle-application-view`) |
+
+### Flashing from a running pmOS
+
+Fastboot works (above), but a boot image can also be written from pmOS itself — the method
+used for every build in engineering.md §40–41:
+```bash
+sshpass -p 12345678 scp out/artifacts/boot-holly-pmos.img user@172.16.42.1:/tmp/boot-new.img
+# on the phone, as root:
+#   dd if=/tmp/boot-new.img of=/dev/mmcblk0 bs=512 seek=$((0x1d80000/512)) conv=notrunc,fsync
+#   dd if=/dev/mmcblk0 bs=512 skip=$((0x1d80000/512)) count=$(( $(stat -c%s /tmp/boot-new.img)/512 )) iflag=direct | md5sum
+```
+BOOTIMG is at eMMC offset `0x1D80000`, 16 MiB. Compare the readback md5 with the host file
+before rebooting. Back up the old partition first.
 
 ## What Works
 
@@ -312,6 +383,10 @@ MT6628                   WiFi + BT + GPS combo chip
 │   └── artifacts/
 │       └── boot-holly-pmos.img            # Final boot image
 ├── tools/
+│   ├── device/                 # Files installed on the phone's rootfs (not in the image):
+│   │   ├── power-wake          #   wake the screen on power key (+ power-wake.initd service)
+│   │   ├── reboot-bootloader   #   reboot(2) "bootloader" → LK fastboot
+│   │   └── phosh-holly-settings.sh  # idle/lock off, nav-key bindings
 │   ├── fbpan.c                 # FBIOPAN_DISPLAY utility
 │   └── initramfs/
 │       ├── init.c              # Initramfs init (BusyBox shell supervisor, USB+LCD consoles)
@@ -346,7 +421,7 @@ MT6628                   WiFi + BT + GPS combo chip
 
 ## Known Issues
 
-### Touchscreen (FINAL: hardware fault — IC dead, driver complete)
+### Touchscreen — see engineering.md §40 (the "hardware fault" below was an I2C driver bug; kept for history)
 Stock runs the Goodix "GT910/guitar" GT9xx driver (vendor kernel 3.4) with a
 **driver-side config upload**: on probe it powers the touch rail, resets the chip,
 verifies the HW-info magic (reg `0x4220` == `0x00900600`), reads the PID/version
@@ -420,6 +495,19 @@ H.264 decoder — Flatpak FreeRDP, Thincast, Windows `mstsc` work; Ubuntu-repo
 `xfreerdp3`/Remmina/GNOME Connections are built `WITH_GFX_H264=OFF` and fail at the
 GFX caps exchange. Details in engineering.md §38.2. Host-side USB NAT is persistent
 via udev (engineering.md §39), and internet time sync covers the absent hardware RTC.
+
+### Blank screen with only the backlight on (solved)
+LK leaves OVL **layer 3** enabled on top of layer 2. Linux draws into layer 2 (the
+simple-framebuffer at `0xBEB00000`); layer 3 points one frame further on (`0xBECC2000`) at stale
+LK data, so the panel showed black with the backlight lit — or the desktop, depending on how the
+phone powered up. `mt6582_disp_ovl_fixup()` in `arch/arm/mach-mediatek/mediatek.c` now keeps only
+the layers scanning the framebuffer (`mt6582: OVL layers 0xc -> 0x4` in dmesg). engineering.md §41.1.
+
+### GPU job timeouts / frozen desktop (solved)
+The Mali-400 interrupts were declared as SPI 174–179; the vendor IRQ table (202–207, vendor IDs =
+SPI + 32) says **SPI 170–175**. Lima waited on the wrong lines, every job timed out every 10 s and
+the compositor froze. Fixed in `mt6582.dtsi`; Phosh's compositor now renders on lima.
+engineering.md §41.2.
 
 ### Display (solved): RGB565 scanning
 The panel's OVL scans the framebuffer as **16-bit RGB565**, even though stock
